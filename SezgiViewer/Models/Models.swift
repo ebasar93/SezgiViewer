@@ -127,6 +127,8 @@ struct TrackedPDF: Codable, Identifiable, Hashable, Sendable {
     var status: FileStatus
     /// Last resolved path, shown in the UI (may be stale if the file moved).
     var lastKnownPath: String
+    /// Whether this file's highlights are included in the aggregated list / export.
+    var isSelected: Bool
 
     init(id: UUID = UUID(),
          displayName: String,
@@ -134,7 +136,8 @@ struct TrackedPDF: Codable, Identifiable, Hashable, Sendable {
          lastModified: Date? = nil,
          cachedHighlights: [Highlight] = [],
          status: FileStatus = .unscanned,
-         lastKnownPath: String = "") {
+         lastKnownPath: String = "",
+         isSelected: Bool = true) {
         self.id = id
         self.displayName = displayName
         self.bookmark = bookmark
@@ -142,10 +145,88 @@ struct TrackedPDF: Codable, Identifiable, Hashable, Sendable {
         self.cachedHighlights = cachedHighlights
         self.status = status
         self.lastKnownPath = lastKnownPath
+        self.isSelected = isSelected
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, bookmark, lastModified, cachedHighlights
+        case status, lastKnownPath, isSelected
+    }
+
+    // Custom decoding so projects saved before `isSelected` existed still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        bookmark = try c.decode(Data.self, forKey: .bookmark)
+        lastModified = try c.decodeIfPresent(Date.self, forKey: .lastModified)
+        cachedHighlights = try c.decodeIfPresent([Highlight].self, forKey: .cachedHighlights) ?? []
+        status = try c.decodeIfPresent(FileStatus.self, forKey: .status) ?? .unscanned
+        lastKnownPath = try c.decodeIfPresent(String.self, forKey: .lastKnownPath) ?? ""
+        isSelected = try c.decodeIfPresent(Bool.self, forKey: .isSelected) ?? true
     }
 
     /// Highlights that should appear in the combined output.
     var exportableHighlights: [Highlight] {
-        status == .ok ? cachedHighlights : []
+        (isSelected && status == .ok) ? cachedHighlights : []
+    }
+}
+
+/// How the aggregated highlight list is ordered.
+enum HighlightSort: String, CaseIterable, Codable, Sendable {
+    case sourceOrder
+    case dateDescending
+    case dateAscending
+    case lengthDescending
+    case lengthAscending
+
+    var label: String {
+        switch self {
+        case .sourceOrder: return "File Order"
+        case .dateDescending: return "Date (Newest First)"
+        case .dateAscending: return "Date (Oldest First)"
+        case .lengthDescending: return "Length (Longest First)"
+        case .lengthAscending: return "Length (Shortest First)"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .sourceOrder: return "list.bullet"
+        case .dateDescending: return "calendar.badge.clock"
+        case .dateAscending: return "calendar"
+        case .lengthDescending: return "arrow.down.right.and.arrow.up.left"
+        case .lengthAscending: return "arrow.up.left.and.arrow.down.right"
+        }
+    }
+
+    /// Returns a sorted copy. `sourceOrder` preserves the incoming order.
+    func apply(to highlights: [Highlight]) -> [Highlight] {
+        switch self {
+        case .sourceOrder:
+            return highlights
+        case .dateDescending:
+            return highlights.sorted { lhs, rhs in
+                switch (lhs.date, rhs.date) {
+                case let (l?, r?): return l > r
+                case (nil, _?): return false   // undated sinks to the bottom
+                case (_?, nil): return true
+                case (nil, nil): return false
+                }
+            }
+        case .dateAscending:
+            return highlights.sorted { lhs, rhs in
+                switch (lhs.date, rhs.date) {
+                case let (l?, r?): return l < r
+                case (nil, _?): return false
+                case (_?, nil): return true
+                case (nil, nil): return false
+                }
+            }
+        case .lengthDescending:
+            return highlights.sorted { $0.text.count > $1.text.count }
+        case .lengthAscending:
+            return highlights.sorted { $0.text.count < $1.text.count }
+        }
     }
 }

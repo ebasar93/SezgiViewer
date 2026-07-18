@@ -12,12 +12,33 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var lastRefreshed: Date?
     @Published private(set) var isScanning = false
     @Published var statusMessage: String?
+    @Published var sortOption: HighlightSort = .sourceOrder {
+        didSet {
+            guard sortOption != oldValue else { return }
+            rebuildAggregated()
+            save()
+        }
+    }
 
     private let persistenceURL: URL
 
     struct PersistedProject: Codable {
         var trackedFiles: [TrackedPDF]
         var lastRefreshed: Date?
+        var sortOption: HighlightSort?
+
+        init(trackedFiles: [TrackedPDF], lastRefreshed: Date?, sortOption: HighlightSort?) {
+            self.trackedFiles = trackedFiles
+            self.lastRefreshed = lastRefreshed
+            self.sortOption = sortOption
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            trackedFiles = try c.decodeIfPresent([TrackedPDF].self, forKey: .trackedFiles) ?? []
+            lastRefreshed = try c.decodeIfPresent(Date.self, forKey: .lastRefreshed)
+            sortOption = try c.decodeIfPresent(HighlightSort.self, forKey: .sortOption)
+        }
     }
 
     init() {
@@ -40,10 +61,13 @@ final class ProjectStore: ObservableObject {
         guard let project = try? JSONDecoder().decode(PersistedProject.self, from: data) else { return }
         trackedFiles = project.trackedFiles
         lastRefreshed = project.lastRefreshed
+        if let sort = project.sortOption { sortOption = sort }
     }
 
     private func save() {
-        let project = PersistedProject(trackedFiles: trackedFiles, lastRefreshed: lastRefreshed)
+        let project = PersistedProject(trackedFiles: trackedFiles,
+                                       lastRefreshed: lastRefreshed,
+                                       sortOption: sortOption)
         guard let data = try? JSONEncoder().encode(project) else { return }
         try? data.write(to: persistenceURL, options: .atomic)
     }
@@ -95,6 +119,44 @@ final class ProjectStore: ObservableObject {
 
     func removeFile(_ id: UUID) {
         removeFiles(ids: [id])
+    }
+
+    /// Toggles whether a file's highlights are included in the output.
+    func toggleSelection(_ id: UUID) {
+        guard let idx = trackedFiles.firstIndex(where: { $0.id == id }) else { return }
+        trackedFiles[idx].isSelected.toggle()
+        rebuildAggregated()
+        save()
+    }
+
+    func setSelection(_ isSelected: Bool, for id: UUID) {
+        guard let idx = trackedFiles.firstIndex(where: { $0.id == id }) else { return }
+        guard trackedFiles[idx].isSelected != isSelected else { return }
+        trackedFiles[idx].isSelected = isSelected
+        rebuildAggregated()
+        save()
+    }
+
+    /// Reorders tracked files (drag-to-sort in the sidebar).
+    func moveFiles(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        trackedFiles.move(fromOffsets: offsets, toOffset: destination)
+        rebuildAggregated()
+        save()
+    }
+
+    /// Moves the file with `id` so it sits immediately before `targetID`.
+    /// Used by the explicit drag-and-drop reordering in the sidebar.
+    func moveFile(id: UUID, beforeID targetID: UUID) {
+        guard id != targetID,
+              let from = trackedFiles.firstIndex(where: { $0.id == id }) else { return }
+        let item = trackedFiles.remove(at: from)
+        if let target = trackedFiles.firstIndex(where: { $0.id == targetID }) {
+            trackedFiles.insert(item, at: target)
+        } else {
+            trackedFiles.append(item)
+        }
+        rebuildAggregated()
+        save()
     }
 
     // MARK: - Scanning / refresh
@@ -151,7 +213,8 @@ final class ProjectStore: ObservableObject {
     }
 
     private func rebuildAggregated() {
-        aggregatedHighlights = trackedFiles.flatMap { $0.exportableHighlights }
+        let combined = trackedFiles.flatMap { $0.exportableHighlights }
+        aggregatedHighlights = sortOption.apply(to: combined)
     }
 
     // MARK: - Export

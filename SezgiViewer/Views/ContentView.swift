@@ -26,6 +26,21 @@ struct ContentView: View {
                 }
                 .help("Add PDF files to the project")
 
+                Menu {
+                    ForEach(HighlightSort.allCases, id: \.self) { option in
+                        Button {
+                            store.sortOption = option
+                        } label: {
+                            Label(option.label,
+                                  systemImage: store.sortOption == option ? "checkmark" : option.systemImage)
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
+                .help("Sort highlights by date or length")
+                .disabled(store.aggregatedHighlights.isEmpty)
+
                 Button {
                     Task { await store.refresh() }
                 } label: {
