@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcode-select -p)",
+      "Bash(swift --version)",
+      "Bash(sw_vers)",
+      "Bash(xcodebuild -project SezgiViewer.xcodeproj -scheme SezgiViewer -configuration Debug -destination 'platform=macOS,arch=arm64' build)",
+      "Bash(xcodebuild -project SezgiViewer.xcodeproj -scheme SezgiViewer -configuration Debug -destination 'generic/platform=macOS' SYMROOT=build build)",
+      "Bash(xcodebuild -runFirstLaunch)",
+      "Bash(xcodebuild -project SezgiViewer.xcodeproj -scheme SezgiViewer -configuration Release -destination 'generic/platform=macOS' SYMROOT=build build)",
+      "Bash(osascript -e 'quit app \"SezgiViewer\"')",
+      "Bash(pkill -x SezgiViewer)",
+      "Bash(chmod +x build.sh)",
+      "Bash(cp -R build/Release/SezgiViewer.app dmg_staging/)",
+      "Bash(ln -s /Applications dmg_staging/Applications)",
+      "Bash(hdiutil create *)",
+      "Bash(hdiutil attach *)",
+      "Read(//tmp/**)",
+      "Bash(codesign -dv /tmp/sezgi_dmg_check/SezgiViewer.app)",
+      "Bash(hdiutil detach *)",
+      "Bash(grep -vE '^total|\\\\.$')"
+    ]
+  }
+}

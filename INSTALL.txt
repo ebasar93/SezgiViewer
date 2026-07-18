@@ -1,0 +1,24 @@
+SezgiViewer — Installation
+==========================
+
+1. Drag "SezgiViewer" onto the "Applications" folder in this window.
+
+2. The first time you open it, macOS may say the app is "damaged" or that it
+   "cannot be opened because the developer cannot be verified."
+   This is expected — the app is free and simply not registered with Apple.
+
+   To fix it (one time only):
+     • Open the "Terminal" app (press Cmd+Space, type Terminal, hit Return)
+     • Copy and paste this line, then press Return:
+
+         xattr -dr com.apple.quarantine /Applications/SezgiViewer.app
+
+3. Now open SezgiViewer from your Applications folder (or Launchpad) normally.
+   It will open without any warnings from now on.
+
+That's it. Enjoy!
+
+---------------------------------------------------------------
+What it does: adds your PDF files, pulls out every highlight, and
+exports them into one clean summary PDF. Add PDFs with the + button
+(or drag them in), press Refresh, then Export.
