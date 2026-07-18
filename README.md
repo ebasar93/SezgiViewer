@@ -89,3 +89,4 @@ SezgiViewer/
   SezgiViewer.entitlements     Sandbox + security-scoped bookmarks
 ```
 # SezgiViewer
+# SezgiViewer
