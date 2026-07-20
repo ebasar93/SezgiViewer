@@ -8,7 +8,10 @@ import UniformTypeIdentifiers
 final class ProjectStore: ObservableObject {
 
     @Published private(set) var trackedFiles: [TrackedPDF] = []
-    @Published private(set) var aggregatedHighlights: [Highlight] = []
+    /// The visible list: single highlights and combined groups, sorted.
+    @Published private(set) var aggregatedEntries: [HighlightEntry] = []
+    /// Highlights hidden app-side (the source PDFs are never modified).
+    @Published private(set) var deletedHighlights: [Highlight] = []
     @Published private(set) var lastRefreshed: Date?
     @Published private(set) var isScanning = false
     @Published var statusMessage: String?
@@ -19,6 +22,17 @@ final class ProjectStore: ObservableObject {
             save()
         }
     }
+    @Published var displayOptions = DisplayOptions() {
+        didSet {
+            guard displayOptions != oldValue else { return }
+            save()
+        }
+    }
+
+    /// Fingerprints of highlights the user deleted from the app.
+    private var deletedFingerprints: Set<String> = []
+    /// User-created combinations, persisted by member fingerprint.
+    private var groups: [HighlightGroup] = []
 
     private let persistenceURL: URL
 
@@ -26,11 +40,22 @@ final class ProjectStore: ObservableObject {
         var trackedFiles: [TrackedPDF]
         var lastRefreshed: Date?
         var sortOption: HighlightSort?
+        var deletedFingerprints: Set<String>?
+        var displayOptions: DisplayOptions?
+        var groups: [HighlightGroup]?
 
-        init(trackedFiles: [TrackedPDF], lastRefreshed: Date?, sortOption: HighlightSort?) {
+        init(trackedFiles: [TrackedPDF],
+             lastRefreshed: Date?,
+             sortOption: HighlightSort?,
+             deletedFingerprints: Set<String>?,
+             displayOptions: DisplayOptions?,
+             groups: [HighlightGroup]?) {
             self.trackedFiles = trackedFiles
             self.lastRefreshed = lastRefreshed
             self.sortOption = sortOption
+            self.deletedFingerprints = deletedFingerprints
+            self.displayOptions = displayOptions
+            self.groups = groups
         }
 
         init(from decoder: Decoder) throws {
@@ -38,18 +63,15 @@ final class ProjectStore: ObservableObject {
             trackedFiles = try c.decodeIfPresent([TrackedPDF].self, forKey: .trackedFiles) ?? []
             lastRefreshed = try c.decodeIfPresent(Date.self, forKey: .lastRefreshed)
             sortOption = try c.decodeIfPresent(HighlightSort.self, forKey: .sortOption)
+            deletedFingerprints = try c.decodeIfPresent(Set<String>.self, forKey: .deletedFingerprints)
+            displayOptions = try c.decodeIfPresent(DisplayOptions.self, forKey: .displayOptions)
+            groups = try c.decodeIfPresent([HighlightGroup].self, forKey: .groups)
         }
     }
 
-    init() {
-        let fm = FileManager.default
-        let base = (try? fm.url(for: .applicationSupportDirectory,
-                                in: .userDomainMask,
-                                appropriateFor: nil,
-                                create: true)) ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("SezgiViewer", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        self.persistenceURL = dir.appendingPathComponent("project.json")
+    /// `persistenceURL` is the project's own JSON file, provided by `ProjectManager`.
+    init(persistenceURL: URL) {
+        self.persistenceURL = persistenceURL
         load()
         rebuildAggregated()
     }
@@ -62,12 +84,18 @@ final class ProjectStore: ObservableObject {
         trackedFiles = project.trackedFiles
         lastRefreshed = project.lastRefreshed
         if let sort = project.sortOption { sortOption = sort }
+        deletedFingerprints = project.deletedFingerprints ?? []
+        if let options = project.displayOptions { displayOptions = options }
+        groups = project.groups ?? []
     }
 
     private func save() {
         let project = PersistedProject(trackedFiles: trackedFiles,
                                        lastRefreshed: lastRefreshed,
-                                       sortOption: sortOption)
+                                       sortOption: sortOption,
+                                       deletedFingerprints: deletedFingerprints,
+                                       displayOptions: displayOptions,
+                                       groups: groups)
         guard let data = try? JSONEncoder().encode(project) else { return }
         try? data.write(to: persistenceURL, options: .atomic)
     }
@@ -200,6 +228,19 @@ final class ProjectStore: ObservableObject {
             }
         }
 
+        // Drop deletion records whose highlight no longer exists in any tracked
+        // file (edited or removed in the source PDF) so the set can't grow stale.
+        let validFingerprints = Set(trackedFiles.flatMap { $0.cachedHighlights }.map(\.fingerprint))
+        deletedFingerprints.formIntersection(validFingerprints)
+
+        // Same for groups: release members that vanished; a group needs at
+        // least two surviving members to stay meaningful.
+        groups = groups.compactMap { group in
+            var group = group
+            group.memberFingerprints.removeAll { !validFingerprints.contains($0) }
+            return group.memberFingerprints.count >= 2 ? group : nil
+        }
+
         rebuildAggregated()
         lastRefreshed = Date()
         save()
@@ -209,12 +250,132 @@ final class ProjectStore: ObservableObject {
         }
 
         let available = trackedFiles.filter { $0.status == .ok }.count
-        statusMessage = "Refreshed · \(aggregatedHighlights.count) highlights from \(available) file\(available == 1 ? "" : "s")"
+        let highlightCount = aggregatedEntries.reduce(0) { $0 + $1.members.count }
+        statusMessage = "Refreshed · \(highlightCount) highlights from \(available) file\(available == 1 ? "" : "s")"
     }
 
     private func rebuildAggregated() {
         let combined = trackedFiles.flatMap { $0.exportableHighlights }
-        aggregatedHighlights = sortOption.apply(to: combined)
+        let visible = combined.filter { !deletedFingerprints.contains($0.fingerprint) }
+        deletedHighlights = sortOption.apply(to: combined.filter { deletedFingerprints.contains($0.fingerprint) })
+
+        var byFingerprint: [String: Highlight] = [:]
+        for h in visible where byFingerprint[h.fingerprint] == nil {
+            byFingerprint[h.fingerprint] = h
+        }
+
+        // Resolve each group to the members currently visible.
+        var groupEntries: [UUID: HighlightEntry] = [:]
+        var consumed: [String: UUID] = [:]
+        for group in groups {
+            let members = group.memberFingerprints.compactMap { byFingerprint[$0] }
+            guard !members.isEmpty else { continue }
+            groupEntries[group.id] = HighlightEntry(id: group.id.uuidString,
+                                                    groupID: group.id,
+                                                    members: members)
+            for member in members { consumed[member.fingerprint] = group.id }
+        }
+
+        // Walk the source-ordered list: a group entry sits where its first
+        // member appears; other members are folded in.
+        var entries: [HighlightEntry] = []
+        var emittedGroups: Set<UUID> = []
+        var singleCounts: [String: Int] = [:]
+        for h in visible {
+            if let groupID = consumed[h.fingerprint] {
+                guard !emittedGroups.contains(groupID) else { continue }
+                emittedGroups.insert(groupID)
+                if let entry = groupEntries[groupID] { entries.append(entry) }
+            } else {
+                // Identical duplicate highlights share a fingerprint; suffix
+                // repeats so list ids stay unique.
+                let n = singleCounts[h.fingerprint, default: 0]
+                singleCounts[h.fingerprint] = n + 1
+                let id = n == 0 ? h.fingerprint : "\(h.fingerprint)#\(n)"
+                entries.append(HighlightEntry(id: id, groupID: nil, members: [h]))
+            }
+        }
+        aggregatedEntries = sortEntries(entries)
+    }
+
+    /// Entry-level counterpart of `HighlightSort.apply`. Combined entries sort
+    /// by their first member's date and by total combined text length.
+    private func sortEntries(_ entries: [HighlightEntry]) -> [HighlightEntry] {
+        switch sortOption {
+        case .sourceOrder:
+            return entries
+        case .dateDescending:
+            return entries.sorted { lhs, rhs in
+                switch (lhs.primary.date, rhs.primary.date) {
+                case let (l?, r?): return l > r
+                case (nil, _?): return false
+                case (_?, nil): return true
+                case (nil, nil): return false
+                }
+            }
+        case .dateAscending:
+            return entries.sorted { lhs, rhs in
+                switch (lhs.primary.date, rhs.primary.date) {
+                case let (l?, r?): return l < r
+                case (nil, _?): return false
+                case (_?, nil): return true
+                case (nil, nil): return false
+                }
+            }
+        case .lengthDescending:
+            return entries.sorted { $0.combinedText.count > $1.combinedText.count }
+        case .lengthAscending:
+            return entries.sorted { $0.combinedText.count < $1.combinedText.count }
+        }
+    }
+
+    // MARK: - Combining
+
+    /// Merges the selected entries (singles and/or existing groups) into one
+    /// combined entry, preserving current on-screen order.
+    func combineEntries(_ selected: Set<HighlightEntry>) {
+        let ordered = aggregatedEntries.filter { selected.contains($0) }
+        let members = ordered.flatMap(\.members)
+        guard members.count >= 2 else { return }
+        let involvedGroups = Set(ordered.compactMap(\.groupID))
+        groups.removeAll { involvedGroups.contains($0.id) }
+        groups.append(HighlightGroup(memberFingerprints: members.map(\.fingerprint)))
+        rebuildAggregated()
+        save()
+        statusMessage = "Combined \(members.count) highlights"
+    }
+
+    /// Splits a combined entry back into its individual highlights.
+    func uncombineEntry(_ entry: HighlightEntry) {
+        guard let groupID = entry.groupID else { return }
+        groups.removeAll { $0.id == groupID }
+        rebuildAggregated()
+        save()
+    }
+
+    // MARK: - App-side deletion
+
+    /// Hides an entry (all its members) from the list and export.
+    /// The source PDFs are untouched.
+    func deleteEntry(_ entry: HighlightEntry) {
+        for member in entry.members {
+            deletedFingerprints.insert(member.fingerprint)
+        }
+        rebuildAggregated()
+        save()
+    }
+
+    func restoreHighlight(_ highlight: Highlight) {
+        deletedFingerprints.remove(highlight.fingerprint)
+        rebuildAggregated()
+        save()
+    }
+
+    func restoreAllDeleted() {
+        guard !deletedFingerprints.isEmpty else { return }
+        deletedFingerprints.removeAll()
+        rebuildAggregated()
+        save()
     }
 
     // MARK: - Export
@@ -229,8 +390,9 @@ final class ProjectStore: ObservableObject {
     /// Generates the combined summary PDF at the chosen destination.
     func exportSummary(to url: URL) {
         do {
-            try SummaryPDFGenerator.generate(highlights: aggregatedHighlights,
+            try SummaryPDFGenerator.generate(entries: aggregatedEntries,
                                              generatedAt: Date(),
+                                             options: displayOptions,
                                              to: url)
             statusMessage = "Exported summary to \(url.lastPathComponent)"
         } catch {

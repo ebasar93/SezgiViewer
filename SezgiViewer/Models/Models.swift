@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import CryptoKit
 
 /// An sRGB color with alpha, stored so highlight colors survive across launches.
 struct RGBAColor: Codable, Hashable, Sendable {
@@ -105,6 +106,20 @@ struct Highlight: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+extension Highlight {
+    /// Stable identity across re-scans. `id` is regenerated every time a file is
+    /// parsed, so anything that must survive a refresh (app-side deletion,
+    /// combining) references this content-derived fingerprint instead. If the
+    /// underlying annotation changes in the source PDF, the fingerprint changes
+    /// and any deletion/combination referencing it is naturally released.
+    var fingerprint: String {
+        let colorKey = String(format: "%.3f,%.3f,%.3f", color.red, color.green, color.blue)
+        let canonical = "\(sourceID.uuidString)|\(pageIndex)|\(colorKey)|\(text)"
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 /// Availability / parse status of a tracked file, recomputed on every refresh.
 enum FileStatus: String, Codable, Sendable {
     case ok          // parsed, has highlights (or unchanged with cached highlights)
@@ -169,6 +184,82 @@ struct TrackedPDF: Codable, Identifiable, Hashable, Sendable {
     /// Highlights that should appear in the combined output.
     var exportableHighlights: [Highlight] {
         (isSelected && status == .ok) ? cachedHighlights : []
+    }
+}
+
+/// A user-created combination of several highlights into one entry.
+/// Members are referenced by fingerprint so the group survives re-scans;
+/// members may come from different source PDFs.
+struct HighlightGroup: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID
+    /// Fingerprints of the member highlights, in display order.
+    var memberFingerprints: [String]
+
+    init(id: UUID = UUID(), memberFingerprints: [String]) {
+        self.id = id
+        self.memberFingerprints = memberFingerprints
+    }
+}
+
+/// One row of the aggregated list: either a single highlight or a combined
+/// group of them. Built fresh on every rebuild; not persisted itself.
+struct HighlightEntry: Identifiable, Hashable, Sendable {
+    let id: String
+    /// Non-nil when this entry is a combined group.
+    let groupID: UUID?
+    /// Always at least one; order is display order.
+    let members: [Highlight]
+
+    var isCombined: Bool { members.count > 1 }
+    var primary: Highlight { members[0] }
+
+    /// Member texts joined for display/export/length-sorting.
+    var combinedText: String {
+        members.map(\.text).joined(separator: "\n")
+    }
+
+    /// Unique source names in member order.
+    var sourceNames: [String] {
+        var seen: [String] = []
+        for m in members where !seen.contains(m.sourceName) { seen.append(m.sourceName) }
+        return seen
+    }
+
+    /// Unique page labels in member order (e.g. ["3", "12"]).
+    var pageLabels: [String] {
+        var seen: [String] = []
+        for m in members {
+            let label = m.pageLabel ?? "\(m.pageIndex + 1)"
+            if !seen.contains(label) { seen.append(label) }
+        }
+        return seen
+    }
+
+    /// Unique member colors in order, for the swatch stack.
+    var colors: [RGBAColor] {
+        var seen: [RGBAColor] = []
+        for m in members where !seen.contains(m.color) { seen.append(m.color) }
+        return seen
+    }
+}
+
+/// Which metadata is shown per highlight, in both the list and the exported PDF.
+struct DisplayOptions: Codable, Hashable, Sendable {
+    var showPage: Bool = true
+    var showSource: Bool = true
+    var showDate: Bool = true
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case showPage, showSource, showDate
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        showPage = try c.decodeIfPresent(Bool.self, forKey: .showPage) ?? true
+        showSource = try c.decodeIfPresent(Bool.self, forKey: .showSource) ?? true
+        showDate = try c.decodeIfPresent(Bool.self, forKey: .showDate) ?? true
     }
 }
 

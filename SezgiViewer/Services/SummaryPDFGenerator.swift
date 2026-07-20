@@ -21,8 +21,9 @@ enum SummaryPDFGenerator {
     enum GeneratorError: Error { case couldNotCreateContext }
 
     /// Generates the summary PDF at `url`. Always a full, fresh render.
-    static func generate(highlights: [Highlight],
+    static func generate(entries: [HighlightEntry],
                          generatedAt: Date,
+                         options: DisplayOptions = DisplayOptions(),
                          to url: URL) throws {
         var mediaBox = CGRect(origin: .zero, size: pageSize)
         guard let ctx = CGContext(url as CFURL, mediaBox: &mediaBox, nil) else {
@@ -35,14 +36,15 @@ enum SummaryPDFGenerator {
                                 background: .white)
         writer.beginPage()
 
-        drawHeader(writer: writer, count: highlights.count, generatedAt: generatedAt)
+        let highlightCount = entries.reduce(0) { $0 + $1.members.count }
+        drawHeader(writer: writer, count: highlightCount, generatedAt: generatedAt)
 
-        if highlights.isEmpty {
+        if entries.isEmpty {
             drawEmptyState(writer: writer)
         } else {
-            for (index, highlight) in highlights.enumerated() {
-                drawEntry(highlight, writer: writer)
-                if index < highlights.count - 1 {
+            for (index, entry) in entries.enumerated() {
+                drawEntry(entry, options: options, writer: writer)
+                if index < entries.count - 1 {
                     writer.drawDivider(color: divider)
                 }
             }
@@ -86,20 +88,25 @@ enum SummaryPDFGenerator {
         writer.drawSingleLine(msg)
     }
 
-    private static func drawEntry(_ highlight: Highlight, writer: PageWriter) {
-        // Meta line: swatch + source name + (right-aligned) page & date.
-        let source = NSAttributedString(string: highlight.sourceName, attributes: [
+    private static func drawEntry(_ entry: HighlightEntry,
+                                  options: DisplayOptions,
+                                  writer: PageWriter) {
+        // Meta line: swatch(es) + source name(s) + (right-aligned) page & date,
+        // each part subject to the project's display options.
+        let sourceText = options.showSource ? entry.sourceNames.joined(separator: ", ") : ""
+        let source = NSAttributedString(string: sourceText, attributes: [
             .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
             .foregroundColor: ink
         ])
 
         var metaBits: [String] = []
-        if let label = highlight.pageLabel, !label.isEmpty {
-            metaBits.append("p. \(label)")
-        } else {
-            metaBits.append("p. \(highlight.pageIndex + 1)")
+        if entry.isCombined {
+            metaBits.append("\(entry.members.count) combined")
         }
-        if let date = highlight.date {
+        if options.showPage {
+            metaBits.append("p. \(entry.pageLabels.joined(separator: ", "))")
+        }
+        if options.showDate, let date = entry.primary.date {
             let df = DateFormatter()
             df.dateStyle = .medium
             df.timeStyle = .none
@@ -111,13 +118,13 @@ enum SummaryPDFGenerator {
         ])
 
         writer.ensureSpace(for: 40)
-        writer.drawMetaRow(swatchColor: highlight.color.nsColor,
+        writer.drawMetaRow(swatchColors: Array(entry.colors.prefix(4)).map(\.nsColor),
                            swatchSize: swatchSize,
                            leading: source,
                            trailing: meta)
         writer.advance(by: 6)
 
-        let body = NSAttributedString(string: highlight.text, attributes: [
+        let body = NSAttributedString(string: entry.combinedText, attributes: [
             .font: NSFont.systemFont(ofSize: 12.5, weight: .regular),
             .foregroundColor: ink,
             .paragraphStyle: bodyParagraphStyle
@@ -129,7 +136,9 @@ enum SummaryPDFGenerator {
     private static let bodyParagraphStyle: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
         p.lineSpacing = 2
-        p.paragraphSpacing = 0
+        // Small gap between the member texts of a combined entry (they are
+        // joined with newlines); single highlights contain no newline.
+        p.paragraphSpacing = 4
         p.lineBreakMode = .byWordWrapping
         return p
     }()
@@ -218,30 +227,39 @@ final class PageWriter {
         advance(by: lineHeight)
     }
 
-    /// Draws the swatch + leading label on the left and a trailing label on the right.
-    func drawMetaRow(swatchColor: NSColor,
+    /// Draws the swatch(es) + leading label on the left and a trailing label on
+    /// the right. Combined entries pass one swatch per distinct member color.
+    func drawMetaRow(swatchColors: [NSColor],
                      swatchSize: CGFloat,
                      leading: NSAttributedString,
                      trailing: NSAttributedString) {
-        let lineHeight = ceil(max(leading.size().height, trailing.size().height))
+        // The swatch sets a floor so the row renders even when both labels are
+        // empty (all display options turned off).
+        let lineHeight = ceil(max(leading.size().height, trailing.size().height, swatchSize))
         ensureSpace(for: lineHeight)
         let bottom = flip(y + lineHeight)
 
-        // Swatch — rounded rect, vertically centered on the line.
+        // Swatches — rounded rects, vertically centered on the line.
+        let swatchGap: CGFloat = 3
         let swatchY = bottom + (lineHeight - swatchSize) / 2
-        let swatchRect = CGRect(x: leftX, y: swatchY, width: swatchSize, height: swatchSize)
-        let path = CGPath(roundedRect: swatchRect, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
         ctx.saveGState()
-        ctx.addPath(path)
-        ctx.setFillColor(swatchColor.cgColor)
-        ctx.fillPath()
-        ctx.addPath(path)
-        ctx.setStrokeColor(NSColor(white: 0, alpha: 0.10).cgColor)
-        ctx.setLineWidth(0.5)
-        ctx.strokePath()
+        for (i, color) in swatchColors.enumerated() {
+            let x = leftX + CGFloat(i) * (swatchSize + swatchGap)
+            let swatchRect = CGRect(x: x, y: swatchY, width: swatchSize, height: swatchSize)
+            let path = CGPath(roundedRect: swatchRect, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil)
+            ctx.addPath(path)
+            ctx.setFillColor(color.cgColor)
+            ctx.fillPath()
+            ctx.addPath(path)
+            ctx.setStrokeColor(NSColor(white: 0, alpha: 0.10).cgColor)
+            ctx.setLineWidth(0.5)
+            ctx.strokePath()
+        }
         ctx.restoreGState()
 
-        let textX = leftX + swatchSize + 8
+        let swatchCount = max(swatchColors.count, 1)
+        let swatchesWidth = CGFloat(swatchCount) * swatchSize + CGFloat(swatchCount - 1) * swatchGap
+        let textX = leftX + swatchesWidth + 8
         withAppKitContext {
             leading.draw(at: CGPoint(x: textX, y: bottom))
             let trailingWidth = ceil(trailing.size().width)

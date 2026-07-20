@@ -6,9 +6,14 @@ summary PDF. Styled to resemble Apple's Preview / native design language.
 
 ## Features
 
-- **Tracked project** — add PDFs via the file picker or drag-and-drop; the set
-  is saved between launches using **security-scoped bookmarks** (works under the
-  App Sandbox, so tracked files stay accessible after relaunch).
+- **Projects** — a welcome window at launch offers **New Project** or opening
+  an existing one; each project tracks its own set of PDFs, sort order, display
+  options, combined highlights and deletions. Projects are stored one JSON file
+  each under Application Support (a pre-projects `project.json` is migrated
+  automatically into a first project).
+- **Tracked PDFs per project** — add PDFs via the file picker or drag-and-drop;
+  the set is saved between launches using **security-scoped bookmarks** (works
+  under the App Sandbox, so tracked files stay accessible after relaunch).
 - **Filterable file list** — search tracked filenames; remove files via
   right-click / swipe.
 - **Highlights only** — parses highlight annotations with PDFKit (compatible
@@ -19,6 +24,16 @@ summary PDF. Styled to resemble Apple's Preview / native design language.
   gracefully when absent).
 - **In-app viewing** — double-click any highlight to open its **page in the
   source PDF**, or open it in Preview.
+- **Combine highlights** — select several entries and combine them into one
+  (across PDFs too). Double-clicking a combined entry opens the same viewer
+  with **◀ ▶ arrows** to step through each member's page; no arrows when all
+  members share one page. Uncombine any time.
+- **App-only deletion** — delete highlights from the list and export without
+  ever touching the source PDF; a **Recently Deleted** section allows restoring
+  them individually or all at once.
+- **Display options** — per-project toggles to show/hide the **page, source
+  file name and date** of each highlight, applied to both the list and the
+  exported summary PDF.
 - **Combined summary PDF** — one continuous list across all files, each entry
   showing the source name, a **colored swatch** matching the highlight, the
   text, and the date. SF font, generous margins, subtle dividers, automatic
@@ -69,24 +84,28 @@ required for local use.
 | Add PDFs…        | ⌘O       |
 | Refresh          | ⌘R       |
 | Export Summary…  | ⌘E       |
+| Close Project    | ⇧⌘W      |
 
 ## Project layout
 
 ```
 SezgiViewer/
-  SezgiViewerApp.swift         App entry, menu commands
-  Models/Models.swift          Highlight, TrackedPDF, RGBAColor, FileStatus
-  Store/ProjectStore.swift     Persistence, bookmarks, refresh, export
+  SezgiViewerApp.swift         App entry, welcome/main switch, menu commands
+  Models/Models.swift          Highlight (+fingerprint), TrackedPDF, groups,
+                               display options, sort
+  Store/
+    ProjectManager.swift       Project list, index, migration, open/close
+    ProjectStore.swift         Per-project persistence, refresh, combine,
+                               delete/restore, export
   Services/
     PDFHighlightExtractor.swift  PDFKit highlight parsing (background-safe)
     SummaryPDFGenerator.swift    Paginated, native-styled PDF renderer
     NotificationManager.swift    Local "no highlights" notifications
   Views/
+    WelcomeView.swift          New Project / existing projects at launch
     ContentView.swift          Split layout, toolbar, importer/exporter
     FileListSidebar.swift       Tracked files, search, drag-and-drop, refresh
-    HighlightListView.swift     Aggregated highlights, search + color filter
-    PDFViewerSheet.swift        Jump-to-page source viewer
+    HighlightListView.swift     Entries, search, color filter, combine, delete
+    PDFViewerSheet.swift        Jump-to-page viewer with multi-page arrows
   SezgiViewer.entitlements     Sandbox + security-scoped bookmarks
 ```
-# SezgiViewer
-# SezgiViewer

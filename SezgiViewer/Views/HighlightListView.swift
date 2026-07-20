@@ -2,34 +2,38 @@ import SwiftUI
 
 struct HighlightListView: View {
     @EnvironmentObject private var store: ProjectStore
-    @Binding var selectedHighlight: Highlight?
-    let onOpen: (Highlight) -> Void
+    let onOpen: (HighlightEntry) -> Void
 
+    @State private var selection = Set<HighlightEntry>()
     @State private var search = ""
     @State private var colorFilter: String? = nil
+    @State private var showDeleted = false
 
     private var colorNames: [String] {
         var seen: [String] = []
-        for h in store.aggregatedHighlights {
-            let name = h.color.approximateName
-            if !seen.contains(name) { seen.append(name) }
+        for entry in store.aggregatedEntries {
+            for color in entry.colors {
+                let name = color.approximateName
+                if !seen.contains(name) { seen.append(name) }
+            }
         }
         return seen.sorted()
     }
 
-    private var filtered: [Highlight] {
-        store.aggregatedHighlights.filter { h in
+    private var filtered: [HighlightEntry] {
+        store.aggregatedEntries.filter { entry in
             let matchesSearch = search.isEmpty
-                || h.text.localizedCaseInsensitiveContains(search)
-                || h.sourceName.localizedCaseInsensitiveContains(search)
-            let matchesColor = colorFilter == nil || h.color.approximateName == colorFilter
+                || entry.combinedText.localizedCaseInsensitiveContains(search)
+                || entry.sourceNames.contains { $0.localizedCaseInsensitiveContains(search) }
+            let matchesColor = colorFilter == nil
+                || entry.colors.contains { $0.approximateName == colorFilter }
             return matchesSearch && matchesColor
         }
     }
 
     var body: some View {
         Group {
-            if store.aggregatedHighlights.isEmpty {
+            if store.aggregatedEntries.isEmpty && store.deletedHighlights.isEmpty {
                 emptyState
             } else {
                 list
@@ -46,9 +50,9 @@ struct HighlightListView: View {
     }
 
     private var subtitle: String {
-        let total = store.aggregatedHighlights.count
+        let total = store.aggregatedEntries.count
         let shown = filtered.count
-        if shown == total { return "\(total) highlight\(total == 1 ? "" : "s")" }
+        if shown == total { return "\(total) entr\(total == 1 ? "y" : "ies")" }
         return "\(shown) of \(total)"
     }
 
@@ -67,28 +71,91 @@ struct HighlightListView: View {
                     Label(name, systemImage: colorFilter == name ? "checkmark" : "")
                 }
             }
+            if !store.deletedHighlights.isEmpty {
+                Divider()
+                Toggle(isOn: $showDeleted) {
+                    Text("Show Recently Deleted (\(store.deletedHighlights.count))")
+                }
+            }
         } label: {
             Label(colorFilter ?? "All Colors", systemImage: "line.3.horizontal.decrease.circle")
         }
-        .disabled(colorNames.isEmpty)
+        .disabled(colorNames.isEmpty && store.deletedHighlights.isEmpty)
     }
 
     private var list: some View {
-        List(selection: $selectedHighlight) {
-            ForEach(filtered) { highlight in
-                HighlightRow(highlight: highlight)
-                    .tag(highlight)
+        List(selection: $selection) {
+            ForEach(filtered) { entry in
+                EntryRow(entry: entry, options: store.displayOptions)
+                    .tag(entry)
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { onOpen(highlight) }
+                    .onTapGesture(count: 2) { onOpen(entry) }
+            }
+            if showDeleted && !store.deletedHighlights.isEmpty {
+                deletedSection
             }
         }
         .listStyle(.inset)
-        .contextMenu(forSelectionType: Highlight.self) { _ in
+        .contextMenu(forSelectionType: HighlightEntry.self) { items in
+            if items.count == 1, let entry = items.first {
+                Button("Open in Source PDF") { onOpen(entry) }
+                if entry.isCombined {
+                    Button("Uncombine") { store.uncombineEntry(entry) }
+                }
+                Divider()
+                Button("Delete from App", role: .destructive) { delete([entry]) }
+            } else if items.count >= 2 {
+                Button("Combine \(items.count) Entries") {
+                    store.combineEntries(items)
+                    selection.removeAll()
+                }
+                Divider()
+                Button("Delete from App", role: .destructive) { delete(Array(items)) }
+            }
         } primaryAction: { items in
-            if let h = items.first { onOpen(h) }
+            if let entry = items.first { onOpen(entry) }
+        }
+        .onDeleteCommand {
+            if !selection.isEmpty { delete(Array(selection)) }
         }
         .overlay(alignment: .bottom) {
             openHintBar
+        }
+    }
+
+    private var deletedSection: some View {
+        Section {
+            ForEach(store.deletedHighlights) { highlight in
+                EntryRow(entry: HighlightEntry(id: highlight.fingerprint,
+                                               groupID: nil,
+                                               members: [highlight]),
+                         options: store.displayOptions)
+                    .opacity(0.45)
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        Button("Restore") { store.restoreHighlight(highlight) }
+                    }
+            }
+        } header: {
+            HStack {
+                Text("Recently Deleted")
+                Spacer()
+                Button("Restore All") { store.restoreAllDeleted() }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
+        } footer: {
+            Text("Deleted highlights are hidden from the list and export only — the source PDFs are never modified.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func delete(_ entries: [HighlightEntry]) {
+        for entry in entries {
+            selection.remove(entry)
+            store.deleteEntry(entry)
         }
     }
 
@@ -129,39 +196,73 @@ struct HighlightListView: View {
     }
 }
 
-private struct HighlightRow: View {
-    let highlight: Highlight
+private struct EntryRow: View {
+    let entry: HighlightEntry
+    let options: DisplayOptions
+
+    private var showsDate: Bool { options.showDate && entry.primary.date != nil }
+    private var hasMeta: Bool {
+        options.showSource || options.showPage || showsDate || entry.isCombined
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(highlight.color.swiftUIColor)
-                .frame(width: 12, height: 12)
-                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(.black.opacity(0.1)))
+            swatches
                 .padding(.top, 3)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(highlight.text)
+                Text(entry.combinedText)
                     .font(.system(size: 13))
-                    .lineLimit(4)
+                    .lineLimit(entry.isCombined ? 8 : 4)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 6) {
-                    Text(highlight.sourceName)
-                        .fontWeight(.medium)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("·")
-                    Text("p. \(highlight.pageLabel ?? "\(highlight.pageIndex + 1)")")
-                    if let date = highlight.date {
-                        Text("·")
-                        Text(date, style: .date)
-                    }
+                if hasMeta {
+                    metaLine
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// One swatch per distinct member color, stacked vertically (max 3).
+    private var swatches: some View {
+        VStack(spacing: 2) {
+            ForEach(Array(entry.colors.prefix(3).enumerated()), id: \.offset) { _, color in
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color.swiftUIColor)
+                    .frame(width: 12, height: 12)
+                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(.black.opacity(0.1)))
+            }
+        }
+    }
+
+    private var metaLine: some View {
+        HStack(spacing: 6) {
+            if entry.isCombined {
+                Label("\(entry.members.count)", systemImage: "link")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    .help("Combined from \(entry.members.count) highlights")
+            }
+            if options.showSource {
+                Text(entry.sourceNames.joined(separator: ", "))
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if options.showPage {
+                if options.showSource { Text("·") }
+                Text("p. \(entry.pageLabels.joined(separator: ", "))")
+            }
+            if showsDate, let date = entry.primary.date {
+                if options.showSource || options.showPage { Text("·") }
+                Text(date, style: .date)
+            }
+        }
     }
 }

@@ -18,7 +18,12 @@
       "Read(//tmp/**)",
       "Bash(codesign -dv /tmp/sezgi_dmg_check/SezgiViewer.app)",
       "Bash(hdiutil detach *)",
-      "Bash(grep -vE '^total|\\\\.$')"
+      "Bash(grep -vE '^total|\\\\.$')",
+      "Bash(./build.sh Debug)",
+      "Read(//Users/emirbasar/Library/Containers/**)",
+      "Read(//Users/emirbasar/Library/Application Support/**)",
+      "Bash(open build/Debug/SezgiViewer.app)",
+      "Bash(osascript -e 'id of app \"SezgiViewer\"')"
     ]
   }
 }
